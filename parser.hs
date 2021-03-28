@@ -21,8 +21,10 @@ data LispVal = Atom String
              | String String
              | Bool Bool
 
+instance Show LispVal where show = showVal
+
 symbol :: Parser Char
-symbol = oneOf "!$%&|*+_/:<=>?@^_~"
+symbol = oneOf "!$%&|*+-/:<=>?@^_~"
 
 spaces :: Parser ()
 spaces = skipMany1 space
@@ -186,24 +188,70 @@ parseExpr = parseAtom
         <|> parseUnquoteSplicing
         <|> parseSchemeList
 
-printLispVal :: LispVal -> String
-printLispVal val = case val of
-    Atom a -> "Atom: " ++ show a
-    List vs -> "List: [" ++ intercalate ", " (fmap printLispVal vs) ++ "]"
-    DottedList vs v -> "Dotted: " ++ printLispVal (List vs) ++ " :: " ++ printLispVal v
-    Number n -> "Number: " ++ show n
-    Float f -> "Float: " ++ show f
-    String s -> "String: " ++ s
-    Character c -> "Character: " ++ show c
-    Bool b -> "Bool: " ++ show b
+-- printLispVal :: LispVal -> String
+-- printLispVal val = case val of
+--     Atom a -> "Atom: " ++ show a
+--     List vs -> "List: [" ++ intercalate ", " (fmap printLispVal vs) ++ "]"
+--     DottedList vs v -> "Dotted: " ++ printLispVal (List vs) ++ " :: " ++ printLispVal v
+--     Number n -> "Number: " ++ show n
+--     Float f -> "Float: " ++ show f
+--     String s -> "String: " ++ s
+--     Character c -> "Character: " ++ show c
+--     Bool b -> "Bool: " ++ show b
 
-readExpr :: String -> String
+showVal :: LispVal -> String
+showVal (String s) = "\"" ++ s ++ "\""
+showVal (Character c) = "'" ++ show c ++ "'"
+showVal (Atom name) = name
+showVal (Number n) = show n
+showVal (Float f) = show f
+showVal (Bool True) = "#t"
+showVal (Bool False) = "#f"
+showVal (List contents) = "(" ++ unwordsList contents ++ ")"
+showVal (DottedList head tail) = "(" ++ unwordsList head ++ " . " ++ showVal tail ++ ")"
+
+unwordsList :: [LispVal] -> String
+unwordsList = unwords . map showVal
+
+eval :: LispVal -> LispVal
+eval val@(String _) = val
+eval val@(Number _) = val
+eval val@(Bool _) = val
+eval (List [Atom "quote", val]) = val
+eval (List (Atom f : args)) = apply f $ map eval args
+
+apply :: String -> [LispVal] -> LispVal
+apply f args = maybe (Bool False) ($ args) $ lookup f primitives
+
+primitives :: [(String, [LispVal] -> LispVal)]
+primitives = [("+", numericBinop (+)),
+              ("-", numericBinop (-)),
+              ("*", numericBinop (*)),
+              ("/", numericBinop div),
+              ("mod", numericBinop mod),
+              ("quotient", numericBinop quot),
+              ("remainder", numericBinop rem)]
+
+numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
+numericBinop op params = Number $ foldl1 op $ map unpackNum params
+
+unpackNum :: LispVal -> Integer
+unpackNum (Number n) = n
+unpackNum (String n) = let parsed = reads n :: [(Integer, String)] in
+                           if null parsed
+                              then 0
+                              else fst . head $ parsed
+unpackNum (List [n]) = unpackNum n
+unpackNum _ = 0
+
+readExpr :: String -> LispVal
 readExpr input = case parse parseExpr "lisp" input of
-    Left err -> "No match: " ++ show err
-    Right val -> "Found value: " ++ printLispVal val
+    Left err -> String $ "No match: " ++ show err
+    Right val -> val
 
 main :: IO ()
+-- getArgs >>= print . eval . readExpr . head
 main = do
     (expr:_) <- getArgs
-    putStrLn expr
-    putStrLn (readExpr expr)
+    putStrLn $ "input: " ++ expr
+    print . eval . readExpr $ expr
