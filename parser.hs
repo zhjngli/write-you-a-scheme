@@ -230,18 +230,55 @@ primitives = [("+", numericBinop (+)),
               ("/", numericBinop div),
               ("mod", numericBinop mod),
               ("quotient", numericBinop quot),
-              ("remainder", numericBinop rem)]
+              ("remainder", numericBinop rem),
+              ("symbol?", unaryOp testSymbol),
+              ("string?", unaryOp testSymbol),
+              ("number?", unaryOp testNumber),
+              ("list?", unaryOp testList),
+              ("char?", unaryOp testChar),
+              ("bool?", unaryOp testBool),
+              ("symbol->string", unaryOp symbolToString),
+              ("string->symbol", unaryOp stringToSymbol)]
+
+unaryOp :: (LispVal -> LispVal) -> [LispVal] -> LispVal
+unaryOp f [v] = f v
+
+testSymbol, testString, testNumber, testList, testBool, testChar :: LispVal -> LispVal
+testSymbol (Atom _) = Bool True
+testSymbol _ = Bool False
+
+testString (String _) = Bool True
+testString _ = Bool False
+
+testNumber (Number _) = Bool True
+testNumber _ = Bool False
+
+testList (List _) = Bool True
+testList (DottedList _ _) = Bool False 
+testList _ = Bool False
+
+testChar (Character _) = Bool True
+testChar _ = Bool False
+
+testBool (Bool _) = Bool True 
+testBool _ = Bool False
+
+symbolToString, stringToSymbol :: LispVal -> LispVal
+symbolToString (Atom a) = String a
+symbolToString _ = String ""
+stringToSymbol (String s) = Atom s
+stringToSymbol _ = Atom ""
 
 numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
 numericBinop op params = Number $ foldl1 op $ map unpackNum params
 
 unpackNum :: LispVal -> Integer
 unpackNum (Number n) = n
-unpackNum (String n) = let parsed = reads n :: [(Integer, String)] in
-                           if null parsed
-                              then 0
-                              else fst . head $ parsed
-unpackNum (List [n]) = unpackNum n
+-- unpackNum (String n) = let parsed = reads n :: [(Integer, String)] in
+--                            if null parsed
+--                               then 0
+--                               else fst . head $ parsed
+-- unpackNum (List [n]) = unpackNum n
 unpackNum _ = 0
 
 readExpr :: String -> LispVal
