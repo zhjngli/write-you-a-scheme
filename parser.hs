@@ -253,8 +253,71 @@ eval (List [Atom "if", cond, t, f]) = do
     case p of
         Bool True  -> eval t
         Bool False -> eval f
+        _          -> throwError $ TypeMismatch "boolean" p
+eval (List (Atom "cond" : args)) = cond args
+eval (List (Atom "case" : args)) = caseL args
 eval (List (Atom f : args)) = mapM eval args >>= apply f
 eval badForm = throwError $ BadSpecialForm "Unrecognized special form" badForm
+
+clause, lastClause :: LispVal -> ThrowsError (Maybe [LispVal])
+clause (List [test, Atom "=>", expr]) = clause $ List [test, expr]
+clause (List (test:exprs)) = case eval test of
+    Left err -> throwError err
+    Right val -> case val of
+        Bool True -> Right (Just exprs)
+        Bool False -> Right Nothing
+        _ -> throwError $ TypeMismatch "boolean" val
+clause badClause = throwError $ BadSpecialForm "cond clause bad form" badClause
+
+lastClause (List (Atom "else" : exprs)) = Right (Just exprs)
+lastClause c = clause c
+
+cond :: [LispVal] -> ThrowsError LispVal
+cond clauses =
+    let firstClausesResult = foldl' f (Right Nothing) $ init clauses
+                             where f a c = case a of
+                                            Left err -> throwError err
+                                            Right (Just exprs) -> a
+                                            Right Nothing -> clause c
+    in case firstClausesResult of
+        Left err -> throwError err
+        Right (Just exprs) -> Right $ List exprs
+        Right Nothing -> case lastClause $ last clauses of
+                            Left err -> throwError err
+                            Right (Just exprs) -> Right $ List exprs
+                            Right Nothing -> throwError $ BadSpecialForm "no cond evaluated to true" $ List clauses
+
+caseClause, lastCaseClause :: ThrowsError LispVal -> LispVal -> ThrowsError (Maybe [LispVal])
+caseClause (Right key) (List (List datum : exprs)) =
+    let keyInDatum = foldl' f False datum
+                     where f a d = a || b
+                            where b = case eqv [key, d] of
+                                    Left err -> False
+                                    Right (Bool b) -> b
+    in if keyInDatum then Right $ Just exprs else Right Nothing
+caseClause (Right key) badClause = throwError $ BadSpecialForm "case clause bad form" badClause
+
+lastCaseClause (Right key) (List (Atom "else" : exprs)) = Right (Just exprs)
+lastCaseClause (Right key) c = caseClause (Right key) c
+
+caseL :: [LispVal] -> ThrowsError LispVal
+caseL (key : exprs) =
+    let kval = case eval key of
+                Left err -> throwError err
+                Right v -> Right v
+    in
+    let firstClausesResult = foldl' f (Right Nothing) $ init exprs
+                             where f a c = case a of
+                                            Left err -> throwError err
+                                            Right (Just exprs) -> a
+                                            Right Nothing -> caseClause kval c
+    in case firstClausesResult of
+        Left err -> throwError err
+        Right (Just ex) -> Right $ List ex
+        Right Nothing -> case lastCaseClause kval (last exprs) of
+                            Left err -> throwError err
+                            Right (Just exprs) -> Right $ List exprs
+                            Right Nothing -> throwError $ BadSpecialForm "no case evaluated to true" $ List exprs
 
 apply :: String -> [LispVal] -> ThrowsError LispVal
 apply f args = maybe (throwError $ NotFunction "Unrecognized primitive function args" f)
@@ -404,21 +467,26 @@ cons [x, DottedList xs xlast] = return $ DottedList (x : xs) xlast
 cons [x1, x2] = return $ DottedList [x1] x2
 cons badArgList = throwError $ NumArgs 2 badArgList
 
+equalList :: ([LispVal] -> ThrowsError LispVal) -> [LispVal] -> [LispVal] -> ThrowsError LispVal
+equalList equalFunc l1 l2 = return $ Bool $ (length l1 == length l2) && all equalPair (zip l1 l2)
+    where equalPair (x1, x2) = case equalFunc [x1, x2] of
+                                Left err -> False
+                                Right (Bool b) -> b
+
 eqv :: [LispVal] -> ThrowsError LispVal
 eqv [Bool arg1, Bool arg2]             = return $ Bool $ arg1 == arg2
 eqv [Number arg1, Number arg2]         = return $ Bool $ arg1 == arg2
 eqv [String arg1, String arg2]         = return $ Bool $ arg1 == arg2
 eqv [Atom arg1, Atom arg2]             = return $ Bool $ arg1 == arg2
 eqv [DottedList xs x, DottedList ys y] = eqv [List $ xs ++ [x], List $ ys ++ [y]]
-eqv [List arg1, List arg2] =
-    return $ Bool $ (length arg1 == length arg2) && all eqvPair (zip arg1 arg2)
-    where eqvPair (x1, x2) = case eqv [x1, x2] of
-                                Left err -> False
-                                Right (Bool val) -> val
+eqv [List arg1, List arg2]             = equalList eqv arg1 arg2
 eqv [_, _]                             = return $ Bool False
 eqv badArgList                         = throwError $ NumArgs 2 badArgList
 
+
 equal :: [LispVal] -> ThrowsError LispVal
+equal [DottedList xs x, DottedList ys y] = equal [List $ xs ++ [x], List $ ys ++ [y]]
+equal [List l1, List l2] = equalList equal l1 l2
 equal [arg1, arg2] = do
       primitiveEquals <- or <$> mapM (unpackEquals arg1 arg2)
                          [AnyUnpacker unpackNum, AnyUnpacker unpackStr, AnyUnpacker unpackBool]
