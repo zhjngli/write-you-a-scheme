@@ -340,6 +340,13 @@ primitives = [("+", numericBinop (+)),
               ("<=", numBoolBinop (<=)),
               ("&&", boolBoolBinop (&&)),
               ("||", boolBoolBinop (||)),
+              ("make-string", makeString),
+              ("string-length", stringLen),
+              ("string-ref", stringRef),
+              ("substring", substring),
+              ("string-append", stringAppend),
+              ("string->list", stringToList),
+              ("list->string", listToString),
               ("string=?", strBoolBinop (==)),
               ("string<?", strBoolBinop (<)),
               ("string>?", strBoolBinop (>)),
@@ -420,6 +427,55 @@ unpackEquals arg1 arg2 (AnyUnpacker unpacker) =
         unpacked2 <- unpacker arg2
         return $ unpacked1 == unpacked2)
     (const $ return False)
+
+makeString, stringLen, stringRef, substring, stringAppend, stringToList, listToString :: [LispVal] -> ThrowsError LispVal
+makeString [Number n, Character c] =
+    if n < 0 then throwError $ Default "Cannot make string with negative characters"
+    else return $ String $ mkStr (fromInteger n) c ""
+    where mkStr 0 c l = l
+          mkStr n c l = mkStr (n - 1) c (c:l)
+makeString [Number n, v] = throwError $ TypeMismatch "character" v
+makeString [v, Character c] = throwError $ TypeMismatch "number" v
+makeString l = throwError $ NumArgs 2 l
+
+stringLen [String s] = return $ Number . toInteger $ length s
+stringLen [v] = throwError $ TypeMismatch "string" v
+stringLen l = throwError $ NumArgs 1 l
+
+stringRef [String s, Number n] = let i = fromInteger n in
+    if i >= length s then throwError $ Default "Index out of bounds"
+    else return $ Character (last (take (i + 1) s))
+stringRef [String s, v] = throwError $ TypeMismatch "number" v
+stringRef [v, Number n] = throwError $ TypeMismatch "string" v
+stringRef l = throwError $ NumArgs 2 l
+
+substring [String s, Number start, Number end] =
+    let len = length s in
+    let st = fromInteger start in
+    let e = fromInteger end in
+    if st < 0 || st > e || e > len then throwError $ Default "Cannot make substring with given indexes"
+    else return $ String $ take (e - st) $ drop st s
+substring [String s, Number start, v] = throwError $ TypeMismatch "number" v
+substring [String s, v, _] = throwError $ TypeMismatch "number" v
+substring [v, _, _] = throwError $ TypeMismatch "string" v
+substring l = throwError $ NumArgs 3 l
+
+stringAppend (String s:l) = case stringAppend l of
+    Right (String ss) -> return $ String (s ++ ss)
+    Left err -> throwError err
+stringAppend (v:l) = throwError $ TypeMismatch "string" v
+stringAppend [] = return $ String ""
+
+stringToList [String s] = return $ List cs
+    where cs = foldl' (\a c -> Character c : a) [] s
+stringToList [v] = throwError $ TypeMismatch "string" v
+stringToList v = throwError $ NumArgs 1 v
+
+listToString (Character c:l) = case listToString l of
+    Right (String s) -> return $ String (c:s)
+    Left err -> throwError err
+listToString (v:l) = throwError $ TypeMismatch "character" v
+listToString [] = return $ List []
 
 testSymbol, testString, testNumber, testList, testBool, testChar :: LispVal -> LispVal
 testSymbol (Atom _) = Bool True
