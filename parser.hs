@@ -10,6 +10,7 @@ import Text.Parsec.Prim (ParsecT,Consumed (Consumed))
 import Data.Char (digitToInt)
 import Data.Complex
 import Data.Array
+import System.IO
 
 data LispVal = Atom String
              | Vector (Array Int LispVal)
@@ -32,6 +33,31 @@ data LispError = NumArgs Integer [LispVal]
                | NotFunction String String
                | UnboundVar String String
                | Default String
+
+-- printLispVal :: LispVal -> String
+-- printLispVal val = case val of
+--     Atom a -> "Atom: " ++ show a
+--     List vs -> "List: [" ++ intercalate ", " (fmap printLispVal vs) ++ "]"
+--     DottedList vs v -> "Dotted: " ++ printLispVal (List vs) ++ " :: " ++ printLispVal v
+--     Number n -> "Number: " ++ show n
+--     Float f -> "Float: " ++ show f
+--     String s -> "String: " ++ s
+--     Character c -> "Character: " ++ show c
+--     Bool b -> "Bool: " ++ show b
+
+unwordsList :: [LispVal] -> String
+unwordsList = unwords . map showVal
+
+showVal :: LispVal -> String
+showVal (String s) = "\"" ++ s ++ "\""
+showVal (Character c) = "'" ++ show c ++ "'"
+showVal (Atom name) = name
+showVal (Number n) = show n
+showVal (Float f) = show f
+showVal (Bool True) = "#t"
+showVal (Bool False) = "#f"
+showVal (List contents) = "(" ++ unwordsList contents ++ ")"
+showVal (DottedList head tail) = "(" ++ unwordsList head ++ " . " ++ showVal tail ++ ")"
 
 showError :: LispError -> String
 showError (UnboundVar message varname)  = message ++ ": " ++ varname
@@ -218,30 +244,8 @@ parseExpr = parseAtom
         <|> parseUnquoteSplicing
         <|> parseSchemeList
 
--- printLispVal :: LispVal -> String
--- printLispVal val = case val of
---     Atom a -> "Atom: " ++ show a
---     List vs -> "List: [" ++ intercalate ", " (fmap printLispVal vs) ++ "]"
---     DottedList vs v -> "Dotted: " ++ printLispVal (List vs) ++ " :: " ++ printLispVal v
---     Number n -> "Number: " ++ show n
---     Float f -> "Float: " ++ show f
---     String s -> "String: " ++ s
---     Character c -> "Character: " ++ show c
---     Bool b -> "Bool: " ++ show b
 
-showVal :: LispVal -> String
-showVal (String s) = "\"" ++ s ++ "\""
-showVal (Character c) = "'" ++ show c ++ "'"
-showVal (Atom name) = name
-showVal (Number n) = show n
-showVal (Float f) = show f
-showVal (Bool True) = "#t"
-showVal (Bool False) = "#f"
-showVal (List contents) = "(" ++ unwordsList contents ++ ")"
-showVal (DottedList head tail) = "(" ++ unwordsList head ++ " . " ++ showVal tail ++ ")"
-
-unwordsList :: [LispVal] -> String
-unwordsList = unwords . map showVal
+-- EVALUATOR
 
 eval :: LispVal -> ThrowsError LispVal
 eval val@(String _) = return val
@@ -555,8 +559,35 @@ readExpr input = case parse parseExpr "lisp" input of
     Left err -> throwError $ Parser err
     Right val -> return val
 
+
+-- REPL
+
+flushStr :: String -> IO ()
+flushStr str = putStr str >> hFlush stdout
+
+readPrompt :: String -> IO String
+readPrompt prompt = flushStr prompt >> getLine
+
+evalString :: String -> IO String
+evalString expr = return $ extractValue $ trapError (liftM show $ readExpr expr >>= eval)
+
+evalAndPrint :: String -> IO ()
+evalAndPrint expr =  evalString expr >>= putStrLn
+
+until_ :: Monad m => (a -> Bool) -> m a -> (a -> m ()) -> m ()
+until_ pred prompt action = do
+   result <- prompt
+   if pred result
+      then return ()
+      else action result >> until_ pred prompt action
+
+runRepl :: IO ()
+runRepl = until_ (== "quit") (readPrompt "Lisp>>> ") evalAndPrint
+
+
 main :: IO ()
-main = do
-     (expr:_) <- getArgs
-     let evaled = fmap show $ readExpr expr >>= eval
-     putStrLn $ extractValue $ trapError evaled
+main = do args <- getArgs
+          case length args of
+               0 -> runRepl
+               1 -> evalAndPrint $ args !! 0
+               otherwise -> putStrLn "Program takes only 0 or 1 argument"
