@@ -1,4 +1,5 @@
 {-# LANGUAGE ExistentialQuantification #-}
+{-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 import Control.Monad
 import Text.ParserCombinators.Parsec hiding (spaces)
 import System.Environment
@@ -11,6 +12,7 @@ import Data.Char (digitToInt)
 import Data.Complex
 import Data.Array
 import System.IO
+import Data.IORef
 
 data LispVal = Atom String
              | Vector (Array Int LispVal)
@@ -247,81 +249,53 @@ parseExpr = parseAtom
 
 -- EVALUATOR
 
-eval :: LispVal -> ThrowsError LispVal
-eval val@(String _) = return val
-eval val@(Number _) = return val
-eval val@(Bool _) = return val
-eval (List [Atom "quote", val]) = return val
-eval (List [Atom "if", cond, t, f]) = do
-    p <- eval cond
+eval :: Env -> LispVal -> IOThrowsError LispVal
+eval env val@(String _) = return val
+eval env val@(Number _) = return val
+eval env val@(Bool _) = return val
+eval env (Atom id) = getVar env id
+eval env (List [Atom "quote", val]) = return val
+eval env (List [Atom "if", cond, t, f]) = do
+    p <- eval env cond
     case p of
-        Bool True  -> eval t
-        Bool False -> eval f
+        Bool True  -> eval env t
+        Bool False -> eval env f
         _          -> throwError $ TypeMismatch "boolean" p
-eval (List (Atom "cond" : args)) = cond args
-eval (List (Atom "case" : args)) = caseL args
-eval (List (Atom f : args)) = mapM eval args >>= apply f
-eval badForm = throwError $ BadSpecialForm "Unrecognized special form" badForm
+eval env (List [Atom "set!", Atom var, form]) =
+     eval env form >>= setVar env var
+eval env (List [Atom "define", Atom var, form]) =
+     eval env form >>= defineVar env var
+eval env (List (Atom "cond" : args)) = cond env args
+eval env (List (Atom "case" : args)) = caseL env args
+eval env (List (Atom f : args)) = mapM (eval env) args >>= liftThrows . apply f
+eval env badForm = throwError $ BadSpecialForm "Unrecognized special form" badForm
 
-clause, lastClause :: LispVal -> ThrowsError (Maybe [LispVal])
-clause (List [test, Atom "=>", expr]) = clause $ List [test, expr]
-clause (List (test:exprs)) = case eval test of
-    Left err -> throwError err
-    Right val -> case val of
-        Bool True -> Right (Just exprs)
-        Bool False -> Right Nothing
-        _ -> throwError $ TypeMismatch "boolean" val
-clause badClause = throwError $ BadSpecialForm "cond clause bad form" badClause
+cond :: Env -> [LispVal] -> IOThrowsError LispVal
+cond env [List [Atom "else", clause]] = eval env clause
+cond env ((List [test, val]) : clauses) = do
+    t <- eval env test
+    case t of
+        Bool True -> return val
+        Bool False -> cond env clauses
+cond env ((List a) : _) = throwError $ NumArgs 2 a
+cond env (a : _) = throwError $ NumArgs 2 [a]
+cond env _ = throwError $ Default "no alternative in cond"
 
-lastClause (List (Atom "else" : exprs)) = Right (Just exprs)
-lastClause c = clause c
-
-cond :: [LispVal] -> ThrowsError LispVal
-cond clauses =
-    let firstClausesResult = foldl' f (Right Nothing) $ init clauses
-                             where f a c = case a of
-                                            Left err -> throwError err
-                                            Right (Just exprs) -> a
-                                            Right Nothing -> clause c
-    in case firstClausesResult of
-        Left err -> throwError err
-        Right (Just exprs) -> Right $ List exprs
-        Right Nothing -> case lastClause $ last clauses of
-                            Left err -> throwError err
-                            Right (Just exprs) -> Right $ List exprs
-                            Right Nothing -> throwError $ BadSpecialForm "no cond evaluated to true" $ List clauses
-
-caseClause, lastCaseClause :: ThrowsError LispVal -> LispVal -> ThrowsError (Maybe [LispVal])
-caseClause (Right key) (List (List datum : exprs)) =
-    let keyInDatum = foldl' f False datum
-                     where f a d = a || b
-                            where b = case eqv [key, d] of
-                                    Left err -> False
-                                    Right (Bool b) -> b
-    in if keyInDatum then Right $ Just exprs else Right Nothing
-caseClause (Right key) badClause = throwError $ BadSpecialForm "case clause bad form" badClause
-
-lastCaseClause (Right key) (List (Atom "else" : exprs)) = Right (Just exprs)
-lastCaseClause (Right key) c = caseClause (Right key) c
-
-caseL :: [LispVal] -> ThrowsError LispVal
-caseL (key : exprs) =
-    let kval = case eval key of
-                Left err -> throwError err
-                Right v -> Right v
-    in
-    let firstClausesResult = foldl' f (Right Nothing) $ init exprs
-                             where f a c = case a of
-                                            Left err -> throwError err
-                                            Right (Just exprs) -> a
-                                            Right Nothing -> caseClause kval c
-    in case firstClausesResult of
-        Left err -> throwError err
-        Right (Just ex) -> Right $ List ex
-        Right Nothing -> case lastCaseClause kval (last exprs) of
-                            Left err -> throwError err
-                            Right (Just exprs) -> Right $ List exprs
-                            Right Nothing -> throwError $ BadSpecialForm "no case evaluated to true" $ List exprs
+caseL :: Env -> [LispVal] -> IOThrowsError LispVal
+caseL env [key, List (Atom "else" : exprs)] = eval env $ last exprs
+caseL env (key : List ((List datum) : exprs) : clauses) = do
+    k <- eval env key
+    matches <- mapM (\x -> liftThrows $ eqv [k, x]) datum
+    let eq = foldl' (\b m -> case b of
+                Bool False -> m
+                Bool True -> Bool True)
+            (Bool False) matches
+    case eq of
+        Bool True -> eval env $ last exprs
+        Bool False -> caseL env (key : clauses)
+caseL env ((List a) : _) = throwError $ NumArgs 2 a
+caseL env (a : _) = throwError $ NumArgs 2 [a]
+caseL env _ = throwError $ Default "no alternative in case"
 
 apply :: String -> [LispVal] -> ThrowsError LispVal
 apply f args = maybe (throwError $ NotFunction "Unrecognized primitive function args" f)
@@ -560,6 +534,56 @@ readExpr input = case parse parseExpr "lisp" input of
     Right val -> return val
 
 
+-- VARIABLES AND ASSIGNMENT
+
+type Env = IORef [(String, IORef LispVal)]
+
+type IOThrowsError = ExceptT LispError IO
+
+liftThrows :: ThrowsError a -> IOThrowsError a
+liftThrows (Left err) = throwError err
+liftThrows (Right val) = return val
+
+nullEnv :: IO Env
+nullEnv = newIORef []
+
+runIOThrows :: IOThrowsError String -> IO String
+runIOThrows action = runExceptT (trapError action) >>= return . extractValue
+
+isBound :: Env -> String -> IO Bool
+isBound envRef var = readIORef envRef >>= return . maybe False (const True) . lookup var
+
+getVar :: Env -> String -> IOThrowsError LispVal
+getVar envRef var  =  do env <- liftIO $ readIORef envRef
+                         maybe (throwError $ UnboundVar "Getting an unbound variable" var)
+                               (liftIO . readIORef)
+                               (lookup var env)
+
+setVar :: Env -> String -> LispVal -> IOThrowsError LispVal
+setVar envRef var value = do env <- liftIO $ readIORef envRef
+                             maybe (throwError $ UnboundVar "Setting an unbound variable" var)
+                                   (liftIO . flip writeIORef value)
+                                   (lookup var env)
+                             return value
+
+defineVar :: Env -> String -> LispVal -> IOThrowsError LispVal
+defineVar envRef var value = do
+     alreadyDefined <- liftIO $ isBound envRef var
+     if alreadyDefined
+        then setVar envRef var value >> return value
+        else liftIO $ do
+             valueRef <- newIORef value
+             env <- readIORef envRef
+             writeIORef envRef ((var, valueRef) : env)
+             return value
+
+bindVars :: Env -> [(String, LispVal)] -> IO Env
+bindVars envRef bindings = readIORef envRef >>= extendEnv bindings >>= newIORef
+     where extendEnv bindings env = liftM (++ env) (mapM addBinding bindings)
+           addBinding (var, value) = do ref <- newIORef value
+                                        return (var, ref)
+
+
 -- REPL
 
 flushStr :: String -> IO ()
@@ -568,11 +592,11 @@ flushStr str = putStr str >> hFlush stdout
 readPrompt :: String -> IO String
 readPrompt prompt = flushStr prompt >> getLine
 
-evalString :: String -> IO String
-evalString expr = return $ extractValue $ trapError (liftM show $ readExpr expr >>= eval)
+evalAndPrint :: Env -> String -> IO ()
+evalAndPrint env expr =  evalString env expr >>= putStrLn
 
-evalAndPrint :: String -> IO ()
-evalAndPrint expr =  evalString expr >>= putStrLn
+evalString :: Env -> String -> IO String
+evalString env expr = runIOThrows $ liftM show $ liftThrows (readExpr expr) >>= eval env
 
 until_ :: Monad m => (a -> Bool) -> m a -> (a -> m ()) -> m ()
 until_ pred prompt action = do
@@ -581,13 +605,15 @@ until_ pred prompt action = do
       then return ()
       else action result >> until_ pred prompt action
 
-runRepl :: IO ()
-runRepl = until_ (== "quit") (readPrompt "Lisp>>> ") evalAndPrint
+runOne :: String -> IO ()
+runOne expr = nullEnv >>= flip evalAndPrint expr
 
+runRepl :: IO ()
+runRepl = nullEnv >>= until_ (== "quit") (readPrompt "Lisp>>> ") . evalAndPrint
 
 main :: IO ()
 main = do args <- getArgs
           case length args of
                0 -> runRepl
-               1 -> evalAndPrint $ args !! 0
-               otherwise -> putStrLn "Program takes only 0 or 1 argument"
+               1 -> runOne $ head args
+               _ -> putStrLn "Program takes only 0 or 1 argument"
