@@ -1,255 +1,44 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
-import Control.Monad
-import Text.ParserCombinators.Parsec hiding (spaces)
-import System.Environment
-import Data.List
-import Numeric
-import Control.Monad.Identity
+module Evaluator (
+    apply,
+    eval,
+    primitives,
+    ioPrimitives,
+    readExpr,
+    readExprList
+) where
+
+import Parser ( parseExpr )
+import Primitives
+    ( IOThrowsError,
+      Env,
+      ThrowsError,
+      LispError(Parser, Default, NumArgs, BadSpecialForm, TypeMismatch),
+      LispVal(Port, Character, IOFunc, PrimitiveFunc, DottedList, List,
+              Atom, Bool, Number, String, Func),
+      showVal,
+      liftThrows,
+      getVar,
+      setVar,
+      defineVar,
+      bindVars )
+
+import Data.List ( foldl' )
+import Control.Monad ( liftM )
 import Control.Monad.Except
-import Text.Parsec.Prim (ParsecT,Consumed (Consumed))
-import Data.Char (digitToInt)
-import Data.Complex
-import Data.Array
+    ( MonadIO(liftIO), MonadError(catchError, throwError) )
+import Text.ParserCombinators.Parsec
+    ( spaces, endBy, parse, Parser )
 import System.IO
-import Data.IORef
+    ( stdout,
+      hClose,
+      openFile,
+      stdin,
+      hGetLine,
+      hPrint,
+      IOMode(WriteMode, ReadMode) )
 
-data LispVal = Atom String
-             | Vector (Array Int LispVal)
-             | List [LispVal]
-             | DottedList [LispVal] LispVal
-             | ComplexNumber (Complex Double)
-             | Float Double
-             | Rational Integer Integer
-             | Number Integer
-             | Character Char
-             | String String
-             | Bool Bool
-             | PrimitiveFunc ([LispVal] -> ThrowsError LispVal)
-             | Func { params :: [String], vararg :: Maybe String,
-                      body :: [LispVal], closure :: Env }
-             | IOFunc ([LispVal] -> IOThrowsError LispVal)
-             | Port Handle
-
-instance Show LispVal where show = showVal
-
-data LispError = NumArgs Integer [LispVal]
-               | TypeMismatch String LispVal
-               | Parser ParseError
-               | BadSpecialForm String LispVal
-               | NotFunction String String
-               | UnboundVar String String
-               | Default String
-
-unwordsList :: [LispVal] -> String
-unwordsList = unwords . map showVal
-
-showVal :: LispVal -> String
-showVal (String s) = "\"" ++ s ++ "\""
-showVal (Character c) = "'" ++ show c ++ "'"
-showVal (Atom name) = name
-showVal (Number n) = show n
-showVal (Float f) = show f
-showVal (Bool True) = "#t"
-showVal (Bool False) = "#f"
-showVal (List contents) = "(" ++ unwordsList contents ++ ")"
-showVal (DottedList head tail) = "(" ++ unwordsList head ++ " . " ++ showVal tail ++ ")"
-showVal (PrimitiveFunc _) = "<primitive>"
-showVal Func {params = args, vararg = varargs, body = body, closure = env} =
-   "(lambda (" ++ unwords (map show args) ++
-      (case varargs of
-         Nothing -> ""
-         Just arg -> " . " ++ arg) ++ ") ...)"
-showVal (IOFunc _) = "<IO primitive>"
-showVal (Port _)   = "<IO port>"
-
-showError :: LispError -> String
-showError (UnboundVar message varname)  = message ++ ": " ++ varname
-showError (BadSpecialForm message form) = message ++ ": " ++ show form
-showError (NotFunction message func)    = message ++ ": " ++ show func
-showError (NumArgs expected found)      = "Expected " ++ show expected
-                                       ++ " args; found values " ++ unwordsList found
-showError (TypeMismatch expected found) = "Invalid type: expected " ++ expected
-                                       ++ ", found " ++ show found
-showError (Parser parseErr)             = "Parse error at " ++ show parseErr
-
-instance Show LispError where show = showError
-
-type ThrowsError = Either LispError
-
-trapError :: (MonadError a m, Show a) => m String -> m String
-trapError action = catchError action (return . show)
-
-extractValue :: ThrowsError a -> a
-extractValue (Right val) = val
-
-symbol :: Parser Char
-symbol = oneOf "!$%&|*+-/:<=>?@^_~"
-
-spaces :: Parser ()
-spaces = skipMany1 space
-
-escapeChar :: Parser Char
-escapeChar = do
-    char '\\'
-    oneOf "\"\\nrt"
-
-parseString :: Parser LispVal
-parseString = do
-    char '"'
-    x <- many (noneOf "\"\\" <|> escapeChar)
-    char '"'
-    return $ String x
-
-parseAtom :: Parser LispVal
-parseAtom = do
-    first <- letter <|> symbol
-    rest <- many (letter <|> digit <|> symbol)
-    let atom = first:rest
-    return $ Atom atom
-
-parseBool :: Parser LispVal
-parseBool = do
-    try $ char '#'
-    b <- letter
-    return $ case b of
-        't' -> Bool True
-        'f' -> Bool False
-
-parseCharacter :: Parser LispVal
-parseCharacter = do
-    try $ string "#\\"
-    c <- string "space" <|> string "newline" <|>
-        do {
-            c <- anyChar;
-            notFollowedBy alphaNum;
-            return [c]
-        }
-    return $ case c of
-        "space" -> Character ' '
-        "newline" -> Character '\n'
-        _ -> Character $ head c
-
-toDouble :: LispVal -> Double
-toDouble (Float d) = d
-toDouble (Number n) = fromIntegral n
-
-parseComplexNumber :: Parser LispVal
-parseComplexNumber = do
-    r <- parseFloat <|> parseNumber
-    char '+'
-    i <- parseFloat <|> parseNumber
-    char 'i'
-    return $ ComplexNumber (toDouble r :+ toDouble i)
-
-parseFloat :: Parser LispVal
-parseFloat = do
-    i <- many1 digit
-    char '.'
-    d <- many1 digit
-    return $ Float . fst . head $ readFloat (i ++ "." ++ d)
-
-parseRational :: Parser LispVal
-parseRational = do
-    numerator <- many1 digit
-    char '/'
-    denominator <- many1 digit
-    return $ Rational (fst . head $ readDec numerator) (fst . head $ readDec denominator)
-
--- parseNumber = liftM (Number . read) $ many1 digit
--- parseNumber = many1 digit >>= \ds -> return $ (Number . read) ds
-parseNum :: ParsecT String () Identity Char -> (String -> Integer) -> Parser LispVal
-parseNum dig readf = do
-    ds <- many1 dig
-    return $ (Number . readf) ds
-
-parseBin :: Parser LispVal
-parseBin = do
-    try $ string "#b"
-    parseNum (oneOf "01") (fst . foldr (\b (s, p) -> (s + (toInteger . digitToInt) b * 2^p, p + 1)) (0, 0))
-
-parseOct :: Parser LispVal
-parseOct = do
-    try $ string "#o"
-    parseNum octDigit (fst . head . readOct)
-
-parseHex :: Parser LispVal
-parseHex = do
-    try $ string "#x"
-    parseNum hexDigit (fst . head . readHex)
-
-parseDec :: Parser LispVal
-parseDec = do
-    try $ string "#d"
-    parseNum digit (fst . head . readDec)
-
-parseNumber :: Parser LispVal
-parseNumber = parseNum digit (fst . head . readDec) <|> parseDec <|> parseHex <|> parseOct <|> parseBin
-
-parseList :: Parser LispVal
-parseList = List <$> sepBy parseExpr spaces
-
-parseDottedList :: Parser LispVal
-parseDottedList = do
-    head <- endBy parseExpr spaces
-    tail <- char '.' >> spaces >> parseExpr
-    return $ DottedList head tail
-
-parseQuoted :: Parser LispVal
-parseQuoted = do
-    char '\''
-    x <- parseExpr
-    return $ List [Atom "quote", x]
-
-parseQuasiQuoted :: Parser LispVal
-parseQuasiQuoted = do
-    char '`'
-    x <- parseExpr
-    return $ List [Atom "quasiquote", x]
-
-parseUnquoted :: Parser LispVal
-parseUnquoted = do
-    char ','
-    x <- parseExpr
-    return $ List [Atom "unquote", x]
-
-parseUnquoteSplicing :: Parser LispVal
-parseUnquoteSplicing = do
-    string ",@"
-    x <- parseExpr
-    return $ List [Atom "unquote-splicing", x]
-
-parseSchemeList :: Parser LispVal
-parseSchemeList = do
-    char '('
-    x <- try parseList <|> parseDottedList
-    char ')'
-    return x
-
-parseVector :: Parser LispVal
-parseVector = do
-    string "#("
-    vs <- sepBy parseExpr spaces
-    char ')'
-    return $ Vector (listArray (0, length vs - 1) vs)
-
-parseExpr :: Parser LispVal
-parseExpr = parseAtom
-        <|> parseString
-        <|> try parseComplexNumber
-        <|> try parseFloat
-        <|> try parseRational
-        <|> try parseNumber
-        <|> try parseBool
-        <|> try parseCharacter
-        <|> parseQuoted
-        <|> parseQuasiQuoted
-        <|> parseUnquoted
-        <|> parseUnquoteSplicing
-        <|> parseSchemeList
-
-
--- EVALUATOR
 
 makeFunc :: Monad m => Maybe String -> Env -> [LispVal] -> [LispVal] -> m LispVal
 makeFunc varargs env params body = return $ Func (map showVal params) varargs body env
@@ -330,7 +119,7 @@ apply (Func params varargs body closure) args =
             num = toInteger . length
             evalBody env = liftM last $ mapM (eval env) body
             bindVarArgs arg env = case arg of
-                Just argName -> liftIO $ bindVars env [(argName, List $ remainingArgs)]
+                Just argName -> liftIO $ bindVars env [(argName, List remainingArgs)]
                 Nothing -> return env
 apply (IOFunc func) args = func args
 
@@ -572,61 +361,7 @@ readExprList :: String -> ThrowsError [LispVal]
 readExprList = readOrThrow (endBy parseExpr spaces)
 
 
--- VARIABLES AND ASSIGNMENT
-
-type Env = IORef [(String, IORef LispVal)]
-
-type IOThrowsError = ExceptT LispError IO
-
-liftThrows :: ThrowsError a -> IOThrowsError a
-liftThrows (Left err) = throwError err
-liftThrows (Right val) = return val
-
-nullEnv :: IO Env
-nullEnv = newIORef []
-
-runIOThrows :: IOThrowsError String -> IO String
-runIOThrows action = runExceptT (trapError action) >>= return . extractValue
-
-isBound :: Env -> String -> IO Bool
-isBound envRef var = readIORef envRef >>= return . maybe False (const True) . lookup var
-
-getVar :: Env -> String -> IOThrowsError LispVal
-getVar envRef var  =  do env <- liftIO $ readIORef envRef
-                         maybe (throwError $ UnboundVar "Getting an unbound variable" var)
-                               (liftIO . readIORef)
-                               (lookup var env)
-
-setVar :: Env -> String -> LispVal -> IOThrowsError LispVal
-setVar envRef var value = do env <- liftIO $ readIORef envRef
-                             maybe (throwError $ UnboundVar "Setting an unbound variable" var)
-                                   (liftIO . flip writeIORef value)
-                                   (lookup var env)
-                             return value
-
-defineVar :: Env -> String -> LispVal -> IOThrowsError LispVal
-defineVar envRef var value = do
-     alreadyDefined <- liftIO $ isBound envRef var
-     if alreadyDefined
-        then setVar envRef var value >> return value
-        else liftIO $ do
-             valueRef <- newIORef value
-             env <- readIORef envRef
-             writeIORef envRef ((var, valueRef) : env)
-             return value
-
-bindVars :: Env -> [(String, LispVal)] -> IO Env
-bindVars envRef bindings = readIORef envRef >>= extendEnv bindings >>= newIORef
-     where extendEnv bindings env = liftM (++ env) (mapM addBinding bindings)
-           addBinding (var, value) = do ref <- newIORef value
-                                        return (var, ref)
-
-primitiveBindings :: IO Env
-primitiveBindings = nullEnv >>= flip bindVars (map (makeFunc IOFunc) ioPrimitives ++ map (makeFunc PrimitiveFunc) primitives)
-     where makeFunc constructor (var, func) = (var, constructor func)
-
-
--- IO PRIMITIVES
+-- IO
 
 ioPrimitives :: [(String, [LispVal] -> IOThrowsError LispVal)]
 ioPrimitives = [("apply", applyProc),
@@ -666,39 +401,3 @@ load filename = liftIO (readFile filename) >>= liftThrows . readExprList
 
 readAll :: [LispVal] -> IOThrowsError LispVal
 readAll [String filename] = liftM List $ load filename
-
-
-
--- REPL
-
-flushStr :: String -> IO ()
-flushStr str = putStr str >> hFlush stdout
-
-readPrompt :: String -> IO String
-readPrompt prompt = flushStr prompt >> getLine
-
-evalAndPrint :: Env -> String -> IO ()
-evalAndPrint env expr =  evalString env expr >>= putStrLn
-
-evalString :: Env -> String -> IO String
-evalString env expr = runIOThrows $ liftM show $ liftThrows (readExpr expr) >>= eval env
-
-until_ :: Monad m => (a -> Bool) -> m a -> (a -> m ()) -> m ()
-until_ pred prompt action = do
-   result <- prompt
-   if pred result
-      then return ()
-      else action result >> until_ pred prompt action
-
-runOne :: [String] -> IO ()
-runOne args = do
-    env <- primitiveBindings >>= flip bindVars [("args", List $ map String $ drop 1 args)]
-    runIOThrows (liftM show $ eval env (List [Atom "load", String (args !! 0)]))
-        >>= hPutStrLn stderr
-
-runRepl :: IO ()
-runRepl = primitiveBindings >>= until_ (== "quit") (readPrompt "Lisp>>> ") . evalAndPrint
-
-main :: IO ()
-main = do args <- getArgs
-          if null args then runRepl else runOne args

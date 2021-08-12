@@ -1,0 +1,48 @@
+name:                scheme-interpreter
+version:             1.0
+github:              "zhjngli/write-you-a-scheme"
+author:              "Zhijiang Li"
+maintainer:          "zl256@cornell.edu"
+
+extra-source-files:
+- README.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/zhjngli/write-you-a-scheme#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- parsec
+- array
+- mtl
+
+library:
+  source-dirs: src
+
+executables:
+  scheme:
+    main:                Main.hs
+    source-dirs:         src   # could be defined in app/ folder, but VSCode doesn't recognize those modules
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - scheme-interpreter
+
+tests:
+  scheme-interpreter-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - scheme-interpreter

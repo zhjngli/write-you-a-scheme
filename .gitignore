@@ -1,3 +1,5 @@
 workspace.code-workspace
 *.hi
 *.o
+.stack-work/
+*~
