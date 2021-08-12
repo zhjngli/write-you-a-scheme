@@ -6,6 +6,7 @@ maintainer:          "zl256@cornell.edu"
 
 extra-source-files:
 - README.md
+- stdlib.scm
 
 # Metadata used when publishing your package
 # synopsis:            Short description of your package

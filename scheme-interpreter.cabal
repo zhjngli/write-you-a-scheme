@@ -14,6 +14,7 @@ maintainer:     zl256@cornell.edu
 build-type:     Simple
 extra-source-files:
     README.md
+    stdlib.scm
 
 source-repository head
   type: git
